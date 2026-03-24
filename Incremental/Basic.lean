@@ -1,4 +1,5 @@
-/-- What do I have right now?
+/-
+What do I have right now?
 1. You can construct a static graph from var and maps
 2. Each time you modify the graph, you get back a new graph where all previous NodeIds are still valid and a newly valid NodeId
 3. The way this implementation works right now, no NodeId created by a call to one of the builder functions will _ever_ be invalid. That seems okay at present because Nat is infinite, and the DAG is entirely static. You _can_ however create invalid graphs by using fake NodeId's as the parents in the builder functions. _However_, there is an easy check for a valid NodeId in a builder arg: if it is greater than the length of g.nodes! This points to an option or a proof in the builder APIs.
@@ -14,8 +15,16 @@ NOTES:
 2. topoOrder is a partial function. Remains to see how that matters. Good choice for a zulip q
 3. Remaining FP in Lean is definitely still useful...
 -/
+module
+
+import Std.Data.HashMap.Basic
 
 abbrev NodeId := Nat
+
+abbrev InputChanges := Std.HashMap NodeId Float
+
+instance : ToString InputChanges where
+  toString chs := ", ".intercalate (toString <$> chs.toList)
 
 inductive NodeTy where
   | var
@@ -55,24 +64,19 @@ instance : BEq Node where
 instance : ToString Node where
   toString n := s!"({n.id}, {n.ty}, {n.val}, {n.parents})"
 
-structure InputChange where
-  n: NodeId
-  val: Float
-
 structure Graph where
   nodes : List Node
   inputs : List NodeId
-  dirtyInputs : List NodeId
-  newInputVals : List Float
+  inputChanges : InputChanges
 
 def Graph.new : Graph :=
-  { nodes := [], inputs := [], dirtyInputs := [], newInputVals := [] }
+  { nodes := [], inputs := [], inputChanges := {} }
 
 instance : Inhabited Graph where
   default := Graph.new
 
 instance : ToString Graph where
-  toString g := s!"inputs = {g.inputs}\ndirtyInputs={g.dirtyInputs}\nnewInputVals={g.newInputVals}\nnodes = [\n  {"\n  ".intercalate (toString <$> g.nodes)}\n]"
+  toString g := s!"inputs = {g.inputs}\ninputChanges={g.inputChanges}\nnodes = [\n  {"\n  ".intercalate (toString <$> g.nodes)}\n]"
 
 /-- Graphviz that just shows ID and type per node -/
 def Graph.toGraphviz (g : Graph) : String :=
@@ -101,22 +105,12 @@ def Graph.var (g : Graph) (init : Float) : (Graph × NodeId) :=
   let newG := {
     nodes := g.nodes.concat newVar,
     inputs := g.inputs.concat newId,
-    dirtyInputs := g.dirtyInputs.concat newId,
-    newInputVals := g.newInputVals.concat init }
+    inputChanges := g.inputChanges.insert newId init }
 
   (newG, newId)
 
 def Graph.setVar (g : Graph) (v : NodeId) (val : Float) : Graph :=
-  let dInIdx := g.dirtyInputs.idxOf v
-  let newDirtyIn := if dInIdx == g.dirtyInputs.length
-    then g.dirtyInputs.concat v
-    else g.dirtyInputs
-
-  let newNewInputVals := if dInIdx == g.newInputVals.length
-    then g.newInputVals.concat val
-    else g.newInputVals.set dInIdx val
-
-  { g with dirtyInputs := newDirtyIn, newInputVals := newNewInputVals }
+  { g with inputChanges := g.inputChanges.insert v val }
 
 def Graph.map (g : Graph) (a : NodeId) (f : Float → Float) : (Graph × NodeId) :=
   let newId := g.numNodes
@@ -225,23 +219,20 @@ def markDirtyParents (g : Graph) (topoOrder : List NodeId) (marks : List DirtyMa
 /-- NOTE: return val is a parallel array to g.nodes _not_ topoOrder! -/
 def markDirtyNodes (g : Graph) (topoOrder : List Nat) : List DirtyMark :=
   let initMarks := List.replicate g.numNodes .undirty
-  let inputsMarked := markDirtyInputs g.dirtyInputs initMarks
+  let inputsMarked := markDirtyInputs (g.inputChanges.toList.map (·.fst)) initMarks
   markDirtyParents g topoOrder inputsMarked
 
 def undirty (g : Graph) (n : NodeId) : Graph :=
   let node := g.nodes[n]!
   match node.ty with
   | .var =>
-    -- 1. Set g.nodes[n].val to the value from newInputVars
-    -- 2. Remove n from dirtyInputs and the parallel entry in newInputVars
-    let dInIdx := g.dirtyInputs.idxOf n
-    let newVal := g.newInputVals[dInIdx]!
-    let newNode := { node with val := some newVal }
+    -- 1. Set g.nodes[n].val to the value from inputChanges[n]
+    -- 2. Remove n from inputChanges
+    let newNode := { node with val := some g.inputChanges[n]! }
 
     { g with
-      nodes := g.nodes.replace node newNode
-      dirtyInputs := g.dirtyInputs.eraseIdx dInIdx
-      newInputVals := g.newInputVals.eraseIdx dInIdx }
+      nodes := g.nodes.replace node newNode,
+      inputChanges := g.inputChanges.erase n }
   | .map a f =>
     let aVal := g.nodes[a]!.val.get!
     let newVal := f aVal
