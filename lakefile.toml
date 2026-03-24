@@ -1,0 +1,15 @@
+name = "Incremental"
+version = "0.1.0"
+defaultTargets = ["incremental"]
+testDriver = "IncrementalTests"
+
+[[lean_lib]]
+name = "Incremental"
+
+[[lean_lib]]
+name = "IncrementalTests"
+globs = ["IncrementalTests.+"]
+
+[[lean_exe]]
+name = "incremental"
+root = "Main"
