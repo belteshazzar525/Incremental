@@ -1,5 +1,6 @@
 import Std.Data.HashMap.Basic
 import Std.Data.HashSet.Basic
+import Batteries.Data.BinaryHeap
 
 abbrev NodeId := Nat
 
@@ -50,7 +51,7 @@ instance : BEq (Node γ) where
   beq a b := a.id == b.id
 
 def Node.toGraphviz (n : Node γ) : String :=
-  let nodeStr := s!"{n.id} [label=\"{if n.label.isEmpty then "" else n.label ++ "\n"}({n.id}, {n.ty}, {n.createdIn}): {n.value}\n[height={n.height}, lastChangedAt={n.lastChangedAt}, lastRecomputedAt={n.lastRecomputedAt}]\"]"
+  let nodeStr := s!"{n.id} [label=\"{if n.label.isEmpty then "" else n.label ++ "\n"}({n.id}, {n.ty}, {n.createdIn}): {n.value}\n[height={n.height}, lastChangedAt={n.lastChangedAt}, lastRecomputedAt={(n.lastRecomputedAt.map toString).getD "none"}]\"]"
   match n.ty with
   | .var => nodeStr
   | .map a _ => nodeStr ++ s!"\n  {n.id} -> {a} [constraint=\"true\"]"
@@ -92,92 +93,6 @@ instance : ToString Graph where
     s!"currentScope={g.currentScope}",
     s!"{g.toGraphviz}"]
 
-abbrev Graph.numNodes (g : Graph) : Nat :=
-  g.nodes.length
-
-abbrev GraphChange := Graph × NodeId
-
-def Graph.var (g : Graph) (init : Float) (label : String := "") : GraphChange :=
-  let newId := g.numNodes
-  let newVar := {
-    id := newId
-    ty := NodeTy.var
-    label
-    value := 0.0
-    createdIn := g.currentScope
-    height := 0
-    lastChangedAt := g.stabilizeId
-    lastRecomputedAt := none }
-
-  let newG := { g with
-    nodes := g.nodes.concat newVar
-    varChanges := g.varChanges.insert newId init }
-
-  (newG, newId)
-
-def Graph.map (g : Graph) (a : NodeId) (f : Float → Float) (label : String := "") : GraphChange :=
-  let newId := g.numNodes
-  let newMap := {
-    id := newId
-    ty := NodeTy.map a f
-    label
-    value := 0.0
-    createdIn := g.currentScope
-    height := 1 + g.nodes[a]!.height
-    lastChangedAt := g.stabilizeId
-    lastRecomputedAt := none }
-
-  let newG := { g with nodes := g.nodes.concat newMap }
-
-  (newG, newId)
-
-def Graph.map2 (g : Graph) (a b : NodeId) (f : Float → Float → Float) (label : String := "") : GraphChange :=
-  let newId := g.numNodes
-  let newMap2 := {
-    id := newId
-    ty := NodeTy.map2 a b f
-    label
-    value := 0.0
-    createdIn := g.currentScope
-    height := 1 + max g.nodes[a]!.height g.nodes[b]!.height
-    lastChangedAt := g.stabilizeId
-    lastRecomputedAt := none }
-
-  let newG := { g with nodes := g.nodes.concat newMap2 }
-
-  (newG, newId)
-
-def Graph.map3 (g : Graph) (a b c : NodeId) (f : Float → Float → Float → Float) (label : String := "") : GraphChange :=
-  let newId := g.numNodes
-  let newMap3 := {
-    id := newId
-    ty := NodeTy.map3 a b c f
-    label
-    value := 0.0
-    createdIn := g.currentScope
-    height := 1 + max g.nodes[a]!.height (max g.nodes[b]!.height g.nodes[c]!.height)
-    lastChangedAt := g.stabilizeId
-    lastRecomputedAt := none }
-
-  let newG := { g with nodes := g.nodes.concat newMap3 }
-
-  (newG, newId)
-
-def Graph.bind (g : Graph) (a : NodeId) (f : Float → GraphChange) (label : String := "") : GraphChange :=
-  let newId := g.numNodes
-  let newBind := {
-    id := newId
-    ty := NodeTy.bind a none f
-    label
-    value := 0.0
-    createdIn := g.currentScope
-    height := 1 + g.nodes[a]!.height
-    lastChangedAt := g.stabilizeId
-    lastRecomputedAt := none }
-
-  let newG := { g with nodes := g.nodes.concat newBind }
-  (newG, newId)
-
 /-- NOTE:
 1. We can make this non-partial
 2. Perf opportunities from building up a new EdgeMap from scratch vs mutating w/ one-reference
@@ -216,6 +131,97 @@ partial def Graph.maintainParents (g : Graph) : Graph :=
 
   { g with parents := maintainParents g.observers.toList [] {} }
 
+abbrev Graph.numNodes (g : Graph) : Nat :=
+  g.nodes.length
+
+abbrev GraphChange := Graph × NodeId
+
+def Graph.var (g : Graph) (init : Float) (label : String := "") : GraphChange :=
+  let newId := g.numNodes
+  let newVar := {
+    id := newId
+    ty := NodeTy.var
+    label
+    value := 0.0
+    createdIn := g.currentScope
+    height := 0
+    lastChangedAt := g.stabilizeId
+    lastRecomputedAt := none }
+
+  let newG := { g with
+    nodes := g.nodes.concat newVar
+    varChanges := g.varChanges.insert newId init }.maintainParents
+
+  (newG, newId)
+
+def Graph.map (g : Graph) (a : NodeId) (f : Float → Float) (label : String := "") : GraphChange :=
+  let newId := g.numNodes
+  let newMap := {
+    id := newId
+    ty := NodeTy.map a f
+    label
+    value := 0.0
+    createdIn := g.currentScope
+    height := 1 + g.nodes[a]!.height
+    lastChangedAt := g.stabilizeId
+    lastRecomputedAt := none }
+
+  let newG := { g with
+    nodes := g.nodes.concat newMap }.maintainParents
+
+  (newG, newId)
+
+def Graph.map2 (g : Graph) (a b : NodeId) (f : Float → Float → Float) (label : String := "") : GraphChange :=
+  let newId := g.numNodes
+  let newMap2 := {
+    id := newId
+    ty := NodeTy.map2 a b f
+    label
+    value := 0.0
+    createdIn := g.currentScope
+    height := 1 + max g.nodes[a]!.height g.nodes[b]!.height
+    lastChangedAt := g.stabilizeId
+    lastRecomputedAt := none }
+
+  let newG := { g with
+    nodes := g.nodes.concat newMap2 }.maintainParents
+
+  (newG, newId)
+
+def Graph.map3 (g : Graph) (a b c : NodeId) (f : Float → Float → Float → Float) (label : String := "") : GraphChange :=
+  let newId := g.numNodes
+  let newMap3 := {
+    id := newId
+    ty := NodeTy.map3 a b c f
+    label
+    value := 0.0
+    createdIn := g.currentScope
+    height := 1 + max g.nodes[a]!.height (max g.nodes[b]!.height g.nodes[c]!.height)
+    lastChangedAt := g.stabilizeId
+    lastRecomputedAt := none }
+
+  let newG := { g with
+    nodes := g.nodes.concat newMap3 }.maintainParents
+
+  (newG, newId)
+
+def Graph.bind (g : Graph) (a : NodeId) (f : Float → GraphChange) (label : String := "") : GraphChange :=
+  let newId := g.numNodes
+  let newBind := {
+    id := newId
+    ty := NodeTy.bind a none f
+    label
+    value := 0.0
+    createdIn := g.currentScope
+    height := 1 + g.nodes[a]!.height
+    lastChangedAt := g.stabilizeId
+    lastRecomputedAt := none }
+
+  let newG := { g with
+    nodes := g.nodes.concat newBind }.maintainParents
+
+  (newG, newId)
+
 def Graph.observe (g : Graph) (n : NodeId) : Graph :=
   if !g.observers.contains n then
     { g with observers := g.observers.insert n }.maintainParents
@@ -229,6 +235,85 @@ def Graph.unobserve (g : Graph) (n : NodeId) : Graph :=
 def Graph.setVar (g : Graph) (v : NodeId) (value : Float) : Graph :=
   { g with varChanges := g.varChanges.insert v value }
 
+partial def Graph.stabilize (g : Graph) : Graph :=
+  -- Batteries.BinaryHeap is a max heap, but we want a min heap, so we reverse the LT relation
+  let heightsGT := fun (a b : NodeId) =>
+    g.nodes[b]!.height.blt g.nodes[a]!.height
+  let initRH := g.varChanges.keysArray.toBinaryHeap heightsGT
+
+  let rec walkRH (rh : Batteries.BinaryHeap NodeId heightsGT) (g : Graph) : Graph :=
+    match rh.extractMax with
+    | (none, _) => g
+    | (some n, rh) =>
+      -- 1. remove from the recompute heap a node with the smallest height
+      let node := g.nodes[n]!
+      -- 2. recompute that node
+      let newNode := match node.ty with
+      | .var => { node with value := g.varChanges[n]! }
+      | .map a f =>
+        let aNode := g.nodes[a]!
+        -- A node is NOT stale if:
+        -- 1. It has been recomputed AND
+        -- 2. Its recomputeID is greater than or equal to the changeId of ALL of its children
+        let notStale := (node.lastRecomputedAt >>=
+          Option.guard (aNode.lastChangedAt.blt ·)).isSome
+
+        if notStale then node
+        else
+          { node with
+            value := f aNode.value
+            lastRecomputedAt := g.stabilizeId }
+      | .map2 a b f =>
+        let aNode := g.nodes[a]!
+        let bNode := g.nodes[b]!
+        let notStale := (node.lastRecomputedAt >>=
+          Option.guard (aNode.lastChangedAt.blt ·) >>=
+          Option.guard (bNode.lastChangedAt.blt ·)).isSome
+
+        if notStale then node
+        else
+          { node with
+            value := f aNode.value bNode.value
+            lastRecomputedAt := g.stabilizeId }
+      | .map3 a b c f =>
+        let aNode := g.nodes[a]!
+        let bNode := g.nodes[b]!
+        let cNode := g.nodes[c]!
+        let notStale := (node.lastRecomputedAt >>=
+          Option.guard (aNode.lastChangedAt.blt ·) >>=
+          Option.guard (bNode.lastChangedAt.blt ·) >>=
+          Option.guard (cNode.lastChangedAt.blt ·)).isSome
+
+        if notStale then node
+        else
+          { node with
+            value := f g.nodes[a]!.value g.nodes[b]!.value g.nodes[c]!.value
+            lastRecomputedAt := g.stabilizeId }
+      | .bind a rhs f => panic! "TODO: bind"
+
+      -- 3. if the node's value changes, then add its parents to the heap.
+      let (newRh, newNode) := if newNode.value != node.value then
+        let rec addParents (ps : List NodeId) (rh : Batteries.BinaryHeap NodeId heightsGT) : Batteries.BinaryHeap NodeId heightsGT :=
+          match ps with
+          | [] => rh
+          | p :: ps => addParents ps (rh.insert p)
+        ((addParents (g.parents.getD n []) rh),
+        { newNode with lastChangedAt := g.stabilizeId })
+      else (rh, newNode)
+
+      walkRH newRh { g with nodes := g.nodes.replace node newNode }
+
+  walkRH initRH { g with stabilizeId := g.stabilizeId + 1 }
+
+def l := [1,2,3,4,1].toArray
+#eval l
+def bh := l.toBinaryHeap (·>·)
+partial def walkBH {lt : Nat → Nat → Bool} (bh : Batteries.BinaryHeap Nat lt) (s : String) : String :=
+  match bh.max with
+  | none => s
+  | some e => walkBH bh.popMax s!"{s}, {e}"
+#eval walkBH bh ""
+
 namespace StaticIfElseTest
 
 structure StaticIfElse where
@@ -239,6 +324,15 @@ structure StaticIfElse where
   d : NodeId
   result : NodeId
 
+/-
+def test (a b c d : Float) : Float :=
+  if a % 2 == 0 then
+    b + c
+  else
+    b + d
+
+test 1.0 2.0 3.0 4.0 =
+-/
 def makeStaticIfElse : StaticIfElse :=
   let g := Graph.new
   let (g, a) := g.var 1.0 "a"
@@ -272,6 +366,12 @@ def observingResult := staticIfElse.g.observe staticIfElse.result
 
 def stopObservingResult := staticIfElse.g.unobserve staticIfElse.result
 #eval stopObservingResult
+
+def stabilized := observingResult.stabilize
+#eval stabilized
+
+def modified := stabilized.setVar staticIfElse.a 2.0
+#eval modified.stabilize
 
 end StaticIfElseTest
 
