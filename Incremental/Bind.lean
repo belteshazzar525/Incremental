@@ -24,7 +24,8 @@ inductive NodeTy where
   | map2 : (val : Option Float) → NodeId → NodeId → (Float → Float → Float) → NodeTy
   | map3 : (val : Option Float) → NodeId → NodeId → NodeId → (Float → Float → Float → Float) → NodeTy
   | bind : (val : Option NodeId) → (a : NodeId) → NodeTy
-  | bindResult : (val : Option Float) → (lhs : NodeId) → (rhs : Option NodeId) → NodeTy
+  | bindResult : (val : Option Float) → (bind : NodeId) → (rhs : Option NodeId) → NodeTy
+  | invalid
 
 instance : ToString NodeTy where
   toString t := match t with
@@ -34,6 +35,7 @@ instance : ToString NodeTy where
   | .map3 v .. => s!"({v} : map3)"
   | .bind v .. => s!"({v} : bind)"
   | .bindResult v .. => s!"({v} : bindResult)"
+  | .invalid => "invalid"
 
 structure Node where
   id : NodeId
@@ -63,11 +65,12 @@ def Node.toGraphviz (n : Node) : String :=
     ++ s!"\n  {n.id} -> {a} [constraint=\"true\"]\n  {n.id} -> {b} [constraint=\"true\"]\n  {n.id} -> {c} [constraint=\"true\"]"
   | .bind v a => nodeStr "bind" s!"{v}"
     ++ s!"\n  {n.id} -> {a} [constraint=\"true\"]"
-  | .bindResult v lhs rhs => nodeStr "bindResult" s!"{v}"
-    ++ s!"\n  {n.id} -> {lhs} [constraint=\"true\"]"
+  | .bindResult v bind rhs => nodeStr "bindResult" s!"{v}"
+    ++ s!"\n  {n.id} -> {bind} [constraint=\"true\"]"
     ++ if let some rhs := rhs then
       s!"\n  {n.id} -> {rhs} [constraint=\"true\"]"
       else ""
+  | .invalid => nodeStr "invalid" ""
 
 def Node.floatVal! (n : Node) : Float :=
   match n.ty with
@@ -76,7 +79,7 @@ def Node.floatVal! (n : Node) : Float :=
   | .map2 v .. => v.get!
   | .map3 v .. => v.get!
   | .bindResult v .. => v.get!
-  | .bind .. => panic! "cannot get float val out of a bind"
+  | .bind .. | .invalid => panic! s!"cannot get float val out of a {n.ty}"
 
 def Node.floatVal? (n : Node) : Option Float :=
   match n.ty with
@@ -85,7 +88,7 @@ def Node.floatVal? (n : Node) : Option Float :=
   | .map2 v .. => v
   | .map3 v .. => v
   | .bindResult v .. => v
-  | .bind .. => none
+  | .bind .. | .invalid => none
 
 def Node.ptrVal! (n : Node) : NodeId :=
   match n.ty with
@@ -152,7 +155,7 @@ partial def Graph.maintainParents (g : Graph) : Graph :=
         panic! s!"Cycle detected to {n}"
       else
         let (children, newParents) := match g.nodes[n]!.ty with
-        | .var _ => ([], parents)
+        | .var _ | .invalid => ([], parents)
         | .map _ a _ =>
           ([a], addParent parents a n)
         | .map2 _ a b _ =>
@@ -161,11 +164,11 @@ partial def Graph.maintainParents (g : Graph) : Graph :=
           ([a, b, c], addParent (addParent (addParent parents a n) b n) c n)
         | .bind _ a =>
           ([a], addParent parents a n)
-        | .bindResult _ lhs rhs =>
+        | .bindResult _ bind rhs =>
           if let some rhs := rhs then
-            ([lhs, rhs], addParent (addParent parents lhs n) rhs n)
+            ([bind, rhs], addParent (addParent parents bind n) rhs n)
           else
-            ([lhs], addParent parents lhs n)
+            ([bind], addParent parents bind n)
 
         let newToVisit := remainingNodes ++ children.filter (!remainingNodes.contains ·)
         maintainParents newToVisit (visited.concat n) newParents
@@ -174,6 +177,12 @@ partial def Graph.maintainParents (g : Graph) : Graph :=
 
 abbrev Graph.numNodes (g : Graph) : Nat :=
   g.nodes.length
+
+abbrev Graph.initHeight (g : Graph) (childHeights : List Nat) : Nat :=
+  let currentScopeHeight := if let Scope.bind n := g.currentScope then
+    g.nodes[n]!.height
+  else 0
+  1 + Nat.max currentScopeHeight (childHeights.max?.getD 0)
 
 def Graph.var (g : Graph) (init : Float) (label : String := "") : GraphChange :=
   let newId := g.numNodes
@@ -189,8 +198,7 @@ def Graph.var (g : Graph) (init : Float) (label : String := "") : GraphChange :=
   let newG := { g with
     nodes := g.nodes.concat newVar
     varChanges := g.varChanges.insert newId init
-    scopes := g.scopes.modify g.currentScope (·.concat newId)
-   }.maintainParents
+    scopes := g.scopes.modify g.currentScope (·.concat newId) }
 
   (newG, newId)
 
@@ -201,14 +209,13 @@ def Graph.map (g : Graph) (a : NodeId) (f : Float → Float) (label : String := 
     ty := NodeTy.map none a f
     label
     createdIn := g.currentScope
-    height := 1 + g.nodes[a]!.height
+    height := g.initHeight [g.nodes[a]!.height]
     lastChangedAt := g.stabilizeId
     lastRecomputedAt := none }
 
   let newG := { g with
     nodes := g.nodes.concat newMap
-    scopes := g.scopes.modify g.currentScope (·.concat newId)
-   }.maintainParents
+    scopes := g.scopes.modify g.currentScope (·.concat newId) }
 
   (newG, newId)
 
@@ -219,14 +226,13 @@ def Graph.map2 (g : Graph) (a b : NodeId) (f : Float → Float → Float) (label
     ty := NodeTy.map2 none a b f
     label
     createdIn := g.currentScope
-    height := 1 + max g.nodes[a]!.height g.nodes[b]!.height
+    height := g.initHeight ((g.nodes[·]!.height) <$> [a, b])
     lastChangedAt := g.stabilizeId
     lastRecomputedAt := none }
 
   let newG := { g with
     nodes := g.nodes.concat newMap2
-    scopes := g.scopes.modify g.currentScope (·.concat newId)
-   }.maintainParents
+    scopes := g.scopes.modify g.currentScope (·.concat newId) }
 
   (newG, newId)
 
@@ -237,14 +243,13 @@ def Graph.map3 (g : Graph) (a b c : NodeId) (f : Float → Float → Float → F
     ty := NodeTy.map3 none a b c f
     label
     createdIn := g.currentScope
-    height := 1 + max g.nodes[a]!.height (max g.nodes[b]!.height g.nodes[c]!.height)
+    height := g.initHeight ((g.nodes[·]!.height) <$> [a, b, c])
     lastChangedAt := g.stabilizeId
     lastRecomputedAt := none }
 
   let newG := { g with
     nodes := g.nodes.concat newMap3
-    scopes := g.scopes.modify g.currentScope (·.concat newId)
-   }.maintainParents
+    scopes := g.scopes.modify g.currentScope (·.concat newId) }
 
   (newG, newId)
 
@@ -255,7 +260,7 @@ def Graph.bind (g : Graph) (a : NodeId) (f : Graph → Float → GraphChange) (b
     ty := NodeTy.bind none a
     label
     createdIn := g.currentScope
-    height := 1 + g.nodes[a]!.height
+    height := g.initHeight [g.nodes[a]!.height]
     lastChangedAt := g.stabilizeId
     lastRecomputedAt := none }
 
@@ -273,8 +278,7 @@ def Graph.bind (g : Graph) (a : NodeId) (f : Graph → Float → GraphChange) (b
 
   let newG := { g with
     nodes := g.nodes ++ [newBind, newBindResult]
-    scopes := g.scopes.modify g.currentScope (· ++ [newBindId, newBindResId])
-   }.maintainParents
+    scopes := g.scopes.modify g.currentScope (· ++ [newBindId, newBindResId]) }
 
   ((newG, newBindResId), newBindGens)
 
@@ -291,15 +295,31 @@ def Graph.unobserve (g : Graph) (n : NodeId) : Graph :=
 def Graph.setVar (g : Graph) (v : NodeId) (value : Float) : Graph :=
   { g with varChanges := g.varChanges.insert v value }
 
+def Graph.prepNewScope (g : Graph) (bind : NodeId) : Graph :=
+  g
+
+def Graph.adjustHeights (g : Graph) : Graph :=
+  -- Batteries.BinaryHeap is a max heap, but we want a min heap, so we reverse the LT relation
+  let heightsGT := fun (a b : NodeId × Nat) => b.snd.blt a.snd
+  let initAH := (g.varChanges.keysArray.map (·, 0)).toBinaryHeap heightsGT
+
+  let rec extendHeap (ns : List (NodeId × Nat)) (heap : Batteries.BinaryHeap (NodeId × Nat) heightsGT) : Batteries.BinaryHeap (NodeId × Nat) heightsGT :=
+    match ns with
+    | [] => heap
+    | n :: ns => extendHeap ns (heap.insert n)
+  g
+
 partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
   -- Batteries.BinaryHeap is a max heap, but we want a min heap, so we reverse the LT relation
+  let RH := Vector (List NodeId) 128
+
   let heightsGT := fun (a b : NodeId × Nat) => b.snd.blt a.snd
   let initRH := (g.varChanges.keysArray.map (·, 0)).toBinaryHeap heightsGT
 
-  let rec addNodes (ns : List (NodeId × Nat)) (rh : Batteries.BinaryHeap (NodeId × Nat) heightsGT) : Batteries.BinaryHeap (NodeId × Nat) heightsGT :=
+  let rec extendHeap (ns : List (NodeId × Nat)) (heap : Batteries.BinaryHeap (NodeId × Nat) heightsGT) : Batteries.BinaryHeap (NodeId × Nat) heightsGT :=
     match ns with
-    | [] => rh
-    | n :: ns => addNodes ns (rh.insert n)
+    | [] => heap
+    | n :: ns => extendHeap ns (heap.insert n)
 
   -- 1. remove from the recompute heap a node with the smallest height
   -- 2. recompute that node
@@ -311,6 +331,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
       let node := g.nodes[n]!
       let (newG, newRh) :=
         match node.ty with
+        | .invalid => (g, rh)
         | .var val =>
           if let some newVal := g.varChanges[n]? then
             if val != newVal then
@@ -320,7 +341,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
                 lastRecomputedAt := g.stabilizeId }
               let newG := { g with
                 nodes := g.nodes.replace node newNode }
-              let newRh := addNodes
+              let newRh := extendHeap
                 ((newG.parents.getD n []).map fun p =>
                   (p, newG.nodes[p]!.height))
                 rh
@@ -356,7 +377,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
                 lastRecomputedAt := g.stabilizeId }
               let newG := { g with
                 nodes := g.nodes.replace node newNode }
-              let newRh := addNodes
+              let newRh := extendHeap
                 ((newG.parents.getD n []).map fun p =>
                   (p, newG.nodes[p]!.height))
                 rh
@@ -384,7 +405,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
                 lastRecomputedAt := g.stabilizeId }
               let newG := { g with
                 nodes := g.nodes.replace node newNode }
-              let newRh := addNodes
+              let newRh := extendHeap
                 ((newG.parents.getD n []).map fun p =>
                   (p, newG.nodes[p]!.height))
                 rh
@@ -414,7 +435,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
                 lastRecomputedAt := g.stabilizeId }
               let newG := { g with
                 nodes := g.nodes.replace node newNode }
-              let newRh := addNodes
+              let newRh := extendHeap
                 ((newG.parents.getD n []).map fun p =>
                   (p, newG.nodes[p]!.height))
                 rh
@@ -430,26 +451,29 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
           if notStale then (g, rh)
           else
             -- If stale, assume a change occurred
+            -- BEGIN EVALUATE BIND
+            -- 1. Remove this bind's existing nodes from the graph
+            let newScopeG := g.prepNewScope n
+            -- 2. Call the bind generator to get a graph with new nodes
             let f := bindGens[n]!
-            -- let (newG, newRhs) := f g aNode.floatVal!
-            let maybeAFloatVal := aNode.floatVal?
-            if maybeAFloatVal.isNone then
-              panic! "Failed unpacking the bind node's a value"
-            else
-
-            -- PICKUP: recursively invalidate all binds in this scope
-            -- 1. Clear them from the g.scopes list
-            -- 2. Clear them from the recomputeHeap
-            -- `let (newScopeG, newScopeRh) := g.newScopeFor n rh`
-            let newScopeG := { g with
-              currentScope := .bind n
-              scopes := g.scopes.insert (.bind n) [] }
-            let newScopeRh := rh.vector.toList.filter fun (p, _) =>
-              newScopeG.nodes[p]!.createdIn == Scope.bind n
-            -- TODO: need to recur on scopes created in this bind
-            let (newG, newRhs) := f newScopeG maybeAFloatVal.get!
-            -- TODO: `let newG := newG.adjustHeights`
-            -- TODO: `let newRh := addNodes newG.scopes[n].map heightsFn rh`
+            let (newG, newRhs) := f newScopeG aNode.floatVal!
+            -- 3. Connect the newRhs node to this bind's bindResult (its sole parent)
+            let bindResId := newG.parents[n]!.head!
+            let bindResult := newG.nodes[bindResId]!
+            let newBindRes := { bindResult with
+              ty := .bindResult bindResult.floatVal? n newRhs }
+            let newG := { newG with
+              nodes := newG.nodes.replace bindResult newBindRes }
+            -- 4. Adjust the heights of the bindResult and all its parents
+            let heightAdjustedG := newG.adjustHeights
+            /- NOTE: you do __NOT__ need to add the new nodes in this bind's rhs
+            to the recomputeHeap because they _all_ have heights _less-than_ the
+            left-hand side. Therefore, evaluate bind _does not_ need to return a
+            new recomputeHeap, _only_ a new graph!
+            TODO: WRONG!!^^^^
+            _Any of the scope's nodes whose children have been seen before need_
+            _to be added to the recomputeHeap._ -/
+            -- TODO: `let newRh := extendHeap newG.scopes[n].map heightsFn rh`
 
             let newNode := { node with
               ty := .bind newRhs a
@@ -457,10 +481,8 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
               lastRecomputedAt := newG.stabilizeId }
             let newG := { newG with
               nodes := newG.nodes.replace node newNode }
-            let newRh := addNodes
-              ((newG.parents.getD n []).map fun p =>
-                (p, newG.nodes[p]!.height))
-              rh -- TODO/NOTE: this should only be adding its one parent, the bindResult
+
+            let newRh := rh.insert (newBindRes.id, newBindRes.height)
             (newG, newRh)
         | .bindResult val lhs rhs =>
           -- let rhs := g.nodes[lhs]!.ptrVal!
@@ -497,7 +519,7 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
                 lastRecomputedAt := g.stabilizeId }
               let newG := { g with
                 nodes := g.nodes.replace node newNode }
-              let newRh := addNodes
+              let newRh := extendHeap
                 ((newG.parents.getD n []).map fun p =>
                   (p, newG.nodes[p]!.height))
                 rh
@@ -505,7 +527,8 @@ partial def Graph.stabilize (g : Graph) (bindGens : BindGenerators) : Graph :=
 
       walkRH newRh newG
 
-  let stableG := walkRH initRH { g with stabilizeId := g.stabilizeId + 1 }
+  let stableG := walkRH initRH { g with
+    stabilizeId := g.stabilizeId + 1 }.maintainParents
   { stableG with varChanges := {} }
 
 def l := [1,2,3,4,1].toArray
@@ -598,12 +621,12 @@ def makeDynamicIfElse : DynamicIfElse :=
   let (g, c) := g.var 3.0
   let (g, d) := g.var 4.0
 
-  let (g, cond) := g.map a (fun x =>
+  let (g, is_even) := g.map a (fun x =>
     if x.toInt64 % 2 == 0 then 1.0 else 0.0)
-    "cond"
+    "is_even"
 
-  let ((g, result), bindGens) := g.bind cond (fun g cond =>
-    if cond == 1.0 then
+  let ((g, result), bindGens) := g.bind is_even (fun g is_even =>
+    if is_even == 1.0 then
       g.map2 b c fun x y =>
         x + y
     else
